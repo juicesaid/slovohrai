@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>СЛОВОГРАЙ — українська гра в слова</title>
+<meta property="og:title" content="СЛОВОГРАЙ">
+<meta property="og:description" content="Склади сузір'я зі слів — українська словесна гра. 134 рівні.">
+<style>
+  html,body{margin:0;padding:0;background:#101731;overscroll-behavior:none}
+  #root{min-height:100vh}
+  .loading{color:#f4c542;font-family:system-ui;text-align:center;padding-top:40vh;font-size:20px;letter-spacing:.1em}
+</style>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div class="loading">СЛОВОГРАЙ ✦</div></div>
+<script type="text/babel" data-presets="react">
+const { useState, useRef, useMemo, useEffect, useCallback } = React;
+
+/* ============================================================
+   СЛОВОГРАЙ — українська словесна гра в стилі Wordscapes
+   Архітектура як у «ЕЛІАС»: один JSX-файл, українська UI,
+   синтезовані звуки (Web Audio), налаштування, Capacitor-ready.
+   Тема: нічний степ — літери як зорі, слова як сузір'я.
+   ============================================================ */
+
+/* ---------- Звуки (синтезовані, як у ЕЛІАС) ---------- */
+let _audioCtx = null;
+function getCtx() {
+  if (!_audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) _audioCtx = new AC();
+  }
+  return _audioCtx;
+}
+function tone(freq, dur = 0.12, type = "sine", vol = 0.18, when = 0) {
+  const ctx = getCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime + when;
+  const osc = ctx.createOscillator();
+  const g = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t0);
+  g.gain.setValueAtTime(0, t0);
+  g.gain.linearRampToValueAtTime(vol, t0 + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  osc.connect(g).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.05);
+}
+const SFX = {
+  pick: (i) => tone(420 + i * 60, 0.08, "triangle", 0.14),
+  word: () => { tone(523, 0.12, "triangle", 0.16); tone(659, 0.14, "triangle", 0.16, 0.08); tone(784, 0.2, "triangle", 0.16, 0.16); },
+  bonus: () => { tone(880, 0.1, "sine", 0.15); tone(1175, 0.16, "sine", 0.15, 0.07); },
+  fail: () => { tone(220, 0.15, "sawtooth", 0.08); tone(180, 0.2, "sawtooth", 0.08, 0.08); },
+  dup: () => tone(330, 0.1, "sine", 0.1),
+  hint: () => { tone(988, 0.08, "sine", 0.12); tone(1319, 0.14, "sine", 0.12, 0.06); },
+  level: () => [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.22, "triangle", 0.15, i * 0.09)),
+};
+
+/* ---------- Плюралізація (як baliv(n) у ЕЛІАС) ---------- */
+function plural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
+}
+const monet = (n) => plural(n, "монета", "монети", "монет");
+const sliv = (n) => plural(n, "слово", "слова", "слів");
+
+/* ---------- Рівні (цільові слова + бонусні) ---------- */
+const LEVELS = [
+  { main: "БРАК", words: ["БРАК","КРАБ","АКР","БАР","РАК"], bonus: [] },
+  { main: "ГРАД", words: ["ГРАД","ГРА","ДАР"], bonus: [] },
+  { main: "ЗОЛА", words: ["ЗОЛА","ЛОЗА","ЗАЛ","ЗЛО"], bonus: [] },
+  { main: "ІКРА", words: ["ІКРА","РІКА","АКР","КІР","РАК","РІК"], bonus: [] },
+  { main: "КАРП", words: ["КАРП","ПАРК","АКР","ПАР","РАК"], bonus: [] },
+  { main: "КЛАН", words: ["КЛАН","ЛАК","ЛАН"], bonus: [] },
+  { main: "КРАН", words: ["КРАН","АКР","РАК"], bonus: [] },
+  { main: "КРІП", words: ["КРІП","КІР","РІК"], bonus: [] },
+  { main: "КУМА", words: ["КУМА","КУМ","МАК"], bonus: [] },
+  { main: "ЛИПА", words: ["ЛИПА","ПИЛА","ПИЛ"], bonus: [] },
+  { main: "РУКА", words: ["РУКА","АКР","РАК"], bonus: [] },
+  { main: "СІНО", words: ["СІНО","НІС","СОН"], bonus: [] },
+  { main: "ЯВІР", words: ["ЯВІР","ВІЯ","РІВ"], bonus: [] },
+  { main: "АКТОР", words: ["АКТОР","АКР","РАК","РОТ"], bonus: [] },
+  { main: "БАЛКА", words: ["БАЛКА","БАЛ","ЛАК"], bonus: [] },
+  { main: "БРАМА", words: ["БРАМА","РАМА","БАР"], bonus: [] },
+  { main: "БУРЯК", words: ["БУРЯК","БУРЯ","БУК"], bonus: [] },
+  { main: "ВЕСЛО", words: ["ВЕСЛО","ОВЕС","СЕЛО","ЛЕВ"], bonus: [] },
+  { main: "ВИХОР", words: ["ВИХОР","ХОРИ","ХОР"], bonus: [] },
+  { main: "ВІДРО", words: ["ВІДРО","ДВІР","РІВ"], bonus: [] },
+  { main: "ВІКНО", words: ["ВІКНО","ВІНОК","ВІК","КІН"], bonus: [] },
+  { main: "ГІЛКА", words: ["ГІЛКА","КІЛ","ЛАК"], bonus: [] },
+  { main: "ГОЛКА", words: ["ГОЛКА","ГОЛ","ЛАК"], bonus: [] },
+  { main: "ГОЛОС", words: ["ГОЛОС","СОЛО","ГОЛ"], bonus: [] },
+  { main: "ГОЛУБ", words: ["ГОЛУБ","ГОЛ","ЛОБ"], bonus: ["ЛУГ"] },
+  { main: "ГРОЗА", words: ["ГРОЗА","ГОРА","ГРА","РАЗ"], bonus: [] },
+  { main: "ДИМАР", words: ["ДИМАР","ДРАМИ","ДАР","ДИМ"], bonus: [] },
+  { main: "ДРАМА", words: ["ДРАМА","РАМА","ДАР"], bonus: [] },
+  { main: "ДРОВА", words: ["ДРОВА","ВОДА","ДАР"], bonus: [] },
+  { main: "ДУМКА", words: ["ДУМКА","КУМА","КУМ","МАК"], bonus: [] },
+  { main: "ЗАМОК", words: ["ЗАМОК","КОЗА","МАК"], bonus: [] },
+  { main: "ЗІРКА", words: ["ЗІРКА","РІЗКА","ІКРА","РІКА","АКР"], bonus: ["ЗІР","КІР","РАЗ","РАК"] },
+  { main: "ЗЛИВА", words: ["ЗЛИВА","ВИЛА","ВАЛ"], bonus: ["ЗАЛ"] },
+  { main: "ІСКРА", words: ["ІСКРА","ІКРА","РІКА","АКР","КІР","РАК"], bonus: ["РІК","СІК"] },
+  { main: "КАРТА", words: ["КАРТА","АКР","РАК"], bonus: [] },
+  { main: "КОЛОС", words: ["КОЛОС","СОЛО","ОКО"], bonus: [] },
+  { main: "КРИГА", words: ["КРИГА","АКР","ГРА","РАК"], bonus: [] },
+  { main: "КУРКА", words: ["КУРКА","РУКА","АКР","РАК"], bonus: [] },
+  { main: "ЛАМПА", words: ["ЛАМПА","ЛАПА","МАПА"], bonus: [] },
+  { main: "МИСКА", words: ["МИСКА","МАК","МИС"], bonus: [] },
+  { main: "МОЛОТ", words: ["МОЛОТ","ЛОМ","ТОМ"], bonus: [] },
+  { main: "НАМУЛ", words: ["НАМУЛ","ЛАН","МУЛ"], bonus: [] },
+  { main: "ОРГАН", words: ["ОРГАН","ГОРА","НОГА","НОРА","ГРА"], bonus: [] },
+  { main: "ОСІНЬ", words: ["ОСІНЬ","СІНО","НІС","СОН"], bonus: [] },
+  { main: "ОСЛІН", words: ["ОСЛІН","СІНО","НІС","СОН"], bonus: [] },
+  { main: "ПАПІР", words: ["ПАПІР","РІПА","ПАР"], bonus: [] },
+  { main: "ПЕНАЛ", words: ["ПЕНАЛ","ЛАН","ПАН"], bonus: [] },
+  { main: "ПИЛКА", words: ["ПИЛКА","ЛИПА","ПИЛА","ЛАК","ПИЛ"], bonus: [] },
+  { main: "ПРОЗА", words: ["ПРОЗА","ПАР","РАЗ"], bonus: [] },
+  { main: "РИБКА", words: ["РИБКА","БРАК","КРАБ","РИБА","АКР","БАР"], bonus: ["БИК","РАК"] },
+  { main: "РОГАЧ", words: ["РОГАЧ","ГОРА","ГРА"], bonus: [] },
+  { main: "РУЧКА", words: ["РУЧКА","РУКА","АКР","РАК"], bonus: [] },
+  { main: "РЯДНО", words: ["РЯДНО","ДНО","РЯД"], bonus: [] },
+  { main: "СЛАВА", words: ["СЛАВА","ЛАВА","ВАЛ"], bonus: [] },
+  { main: "СЛИВА", words: ["СЛИВА","ВИЛА","СИЛА","ВАЛ","ЛИС"], bonus: [] },
+  { main: "СОКІЛ", words: ["СОКІЛ","КІЛ","СІК"], bonus: [] },
+  { main: "СОСНА", words: ["СОСНА","ОСА","СОН"], bonus: [] },
+  { main: "СПИНА", words: ["СПИНА","ПАН","СИН"], bonus: [] },
+  { main: "ШКІРА", words: ["ШКІРА","ІКРА","РІКА","АКР","КІР","РАК"], bonus: ["РІК"] },
+  { main: "ШТАНИ", words: ["ШТАНИ","ТИША","ТИН"], bonus: [] },
+  { main: "БАЙРАК", words: ["БАЙРАК","БАЙКА","БРАК","КРАБ","АКР","БАР"], bonus: ["РАЙ","РАК"] },
+  { main: "БОРОДА", words: ["БОРОДА","ДОБРО","БАР","ДАР"], bonus: [] },
+  { main: "БУКВАР", words: ["БУКВАР","БУКВА","БРАК","КРАБ","РУКА","АКР"], bonus: ["БАР","БУК","РАК"] },
+  { main: "ВОРОНА", words: ["ВОРОНА","ВОРОН","НОРА"], bonus: [] },
+  { main: "ГАРБУЗ", words: ["ГАРБУЗ","ГУБА","БАР","ГРА","ЗУБ","РАЗ"], bonus: [] },
+  { main: "ГІТАРА", words: ["ГІТАРА","ГРА","РІГ"], bonus: [] },
+  { main: "ДОЛИНА", words: ["ДОЛИНА","ДНО","ЛАН"], bonus: [] },
+  { main: "ДОЛОНЯ", words: ["ДОЛОНЯ","ДОЛЯ","ДНО"], bonus: [] },
+  { main: "ДОРОГА", words: ["ДОРОГА","ГОРА","ГРАД","ГРА","ДАР"], bonus: [] },
+  { main: "ЗАВІСА", words: ["ЗАВІСА","ВАЗА","ВІЗ"], bonus: [] },
+  { main: "КАЛИНА", words: ["КАЛИНА","КЛАН","ЛАК","ЛАН"], bonus: [] },
+  { main: "КАМІНЬ", words: ["КАМІНЬ","КІН","МАК"], bonus: [] },
+  { main: "КІСТКА", words: ["КІСТКА","КІТ","СІК","ТІК"], bonus: [] },
+  { main: "КЛЯМКА", words: ["КЛЯМКА","ЛАК","МАК","ЯМА"], bonus: [] },
+  { main: "КОБЗАР", words: ["КОБЗАР","КОБЗА","БРАК","КОЗА","КРАБ","АКР"], bonus: ["БАР","РАЗ","РАК"] },
+  { main: "КОЛІНО", words: ["КОЛІНО","КІЛ","КІН","ОКО"], bonus: [] },
+  { main: "КОМОРА", words: ["КОМОРА","АКР","МАК","ОКО","РАК"], bonus: [] },
+  { main: "КОРОВА", words: ["КОРОВА","КРОВ","АКР","ОКО","РАК"], bonus: [] },
+  { main: "КРИВДА", words: ["КРИВДА","АКР","ДАР","РАК"], bonus: [] },
+  { main: "КУРГАН", words: ["КУРГАН","КРАН","РУКА","АКР","ГРА","РАК"], bonus: [] },
+  { main: "КУХОЛЬ", words: ["КУХОЛЬ","ЛЬОХ","ЛУК"], bonus: [] },
+  { main: "ЛІКОТЬ", words: ["ЛІКОТЬ","ЛІТО","КІЛ","КІТ","ТІК"], bonus: [] },
+  { main: "МАЛИНА", words: ["МАЛИНА","МЛИН","ЛАН"], bonus: [] },
+  { main: "МОГИЛА", words: ["МОГИЛА","МИЛО","ГОЛ","ЛОМ"], bonus: [] },
+  { main: "МОРКВА", words: ["МОРКВА","КРОВ","МОВА","АКР","МАК","РАК"], bonus: [] },
+  { main: "ОСТРІВ", words: ["ОСТРІВ","ТРІО","РІВ","РОТ"], bonus: [] },
+  { main: "ПАГОРБ", words: ["ПАГОРБ","ГОРА","БАР","ГРА","ПАР"], bonus: [] },
+  { main: "ПЛАХТА", words: ["ПЛАХТА","ЛАПА","ХАТА"], bonus: [] },
+  { main: "ПОГРІБ", words: ["ПОГРІБ","ПОРІГ","РІГ"], bonus: [] },
+  { main: "ПОСУХА", words: ["ПОСУХА","ОСА","ПУХ","СУП"], bonus: [] },
+  { main: "ПРАВДА", words: ["ПРАВДА","ПРАВА","ДАР","ПАР"], bonus: [] },
+  { main: "ПРИБІЙ", words: ["ПРИБІЙ","БІЙ","РІЙ"], bonus: [] },
+  { main: "РЕДЬКА", words: ["РЕДЬКА","АКР","ДАР","РАК"], bonus: [] },
+  { main: "СВІЧКА", words: ["СВІЧКА","ВІК","СІК","ЧАС"], bonus: [] },
+  { main: "СКРИНЯ", words: ["СКРИНЯ","СИН","СИР"], bonus: [] },
+  { main: "СОБАКА", words: ["СОБАКА","КОСА","БАС","ОСА"], bonus: [] },
+  { main: "СОКИРА", words: ["СОКИРА","КОСА","РОСА","РОСИ","АКР","ОСА"], bonus: ["РАК","СИР"] },
+  { main: "ЧАСНИК", words: ["ЧАСНИК","СИН","ЧАС"], bonus: [] },
+  { main: "ШПИНАТ", words: ["ШПИНАТ","ШТАНИ","ТИША","ПАН","ТИН"], bonus: [] },
+  { main: "ЩАВЕЛЬ", words: ["ЩАВЕЛЬ","ВАЛ","ЛЕВ"], bonus: [] },
+  { main: "АНТРАКТ", words: ["АНТРАКТ","КАРТА","КРАН","ТАКТ","АКР","РАК"], bonus: [] },
+  { main: "БАНДУРА", words: ["БАНДУРА","БАР","ДАР"], bonus: ["ДУБ"] },
+  { main: "БАРАБАН", words: ["БАРАБАН","БАБА","БАР"], bonus: [] },
+  { main: "БУРЕВІЙ", words: ["БУРЕВІЙ","БІЙ","РІВ","РІЙ"], bonus: [] },
+  { main: "ВЕСЕЛКА", words: ["ВЕСЕЛКА","ВАЛ","ЛАК","ЛЕВ"], bonus: [] },
+  { main: "ВИДЕЛКА", words: ["ВИДЕЛКА","ВИЛА","ВАЛ","ЛАК","ЛЕВ"], bonus: [] },
+  { main: "ВІДЛИГА", words: ["ВІДЛИГА","ВИЛА","ВАЛ","ЛІД"], bonus: [] },
+  { main: "ВОЛОССЯ", words: ["ВОЛОССЯ","СЛОВО","ВОЛЯ","СОЛО"], bonus: [] },
+  { main: "ДУБРОВА", words: ["ДУБРОВА","БРОВА","ДРОВА","ВОДА","БАР","ДАР"], bonus: ["ДУБ"] },
+  { main: "КАПУСТА", words: ["КАПУСТА","САПА","УСТА"], bonus: ["СУП"] },
+  { main: "КВАСОЛЯ", words: ["КВАСОЛЯ","ВОЛЯ","КОСА","САЛО","СОВА","ВАЛ"], bonus: ["ЛАК","ОСА"] },
+  { main: "КОВАДЛО", words: ["КОВАДЛО","ВОДА","ВАЛ","ЛАК","ОКО"], bonus: [] },
+  { main: "КОЛИСКА", words: ["КОЛИСКА","КОСА","САЛО","СИЛА","ЛАК","ЛИС"], bonus: ["ОСА"] },
+  { main: "КОЧЕРГА", words: ["КОЧЕРГА","РОГАЧ","ГОРА","ГОРЕ","АКР","ГРА"], bonus: ["РАК"] },
+  { main: "ЛАМПАДА", words: ["ЛАМПАДА","ЛАМПА","ЛАПА","МАПА"], bonus: [] },
+  { main: "МАКІТРА", words: ["МАКІТРА","КАРТА","ІКРА","РАМА","РІКА","АКР"], bonus: ["КІР","КІТ","МАК","РАК"] },
+  { main: "МОЛОТОК", words: ["МОЛОТОК","МОЛОТ","ЛОМ","ОКО","ТОМ"], bonus: [] },
+  { main: "НАМИСТО", words: ["НАМИСТО","НОТА","НОТИ","МИС","ОСА","СИН"], bonus: ["СОМ","СОН","ТИН","ТОМ"] },
+  { main: "ОПЛЕСКИ", words: ["ОПЛЕСКИ","ПОЛЕ","СЕЛО","ЛИС","ПЕС","ПИЛ"], bonus: [] },
+  { main: "ПІДЛОГА", words: ["ПІДЛОГА","ГОЛ","ЛІД"], bonus: [] },
+  { main: "ПОДУШКА", words: ["ПОДУШКА","ДОШКА","ДУША"], bonus: ["ДУШ"] },
+  { main: "ПУСТЕЛЯ", words: ["ПУСТЕЛЯ","СТЕЛЯ","СТЕП","ТЕЛЯ","ПЕС","СУП"], bonus: [] },
+  { main: "РУБАНОК", words: ["РУБАНОК","БАНК","БРАК","КРАБ","КРАН","НОРА"], bonus: ["РУКА","АКР","БАР","БУК"] },
+  { main: "СВЕРДЛО", words: ["СВЕРДЛО","ВЕСЛО","ОВЕС","ОРЕЛ","СЕЛО","ЛЕВ"], bonus: [] },
+  { main: "СКРИПКА", words: ["СКРИПКА","КАРП","КРИК","ПАРК","АКР","ПАР"], bonus: ["РАК","СИР"] },
+  { main: "СОПІЛКА", words: ["СОПІЛКА","ПІСОК","СОКІЛ","КОСА","САЛО","КІЛ"], bonus: ["ЛАК","ОСА","СІК"] },
+  { main: "СОРОЧКА", words: ["СОРОЧКА","КОСА","РОСА","АКР","ОКО","ОСА"], bonus: ["РАК","ЧАС"] },
+  { main: "СТІЛЕЦЬ", words: ["СТІЛЕЦЬ","СІЛЬ","СТІЛ"], bonus: [] },
+  { main: "СТОДОЛА", words: ["СТОДОЛА","САЛО","СОЛО","ОСА","САД"], bonus: [] },
+  { main: "СТРІЧКА", words: ["СТРІЧКА","ІСКРА","ІКРА","РІКА","АКР","КІР"], bonus: ["КІТ","РАК","РІК","СІК"] },
+  { main: "СУТІНКИ", words: ["СУТІНКИ","КИТ","КІН","КІТ","НІС","СИН"], bonus: ["СІК","ТИН","ТІК"] },
+  { main: "ТАБУРЕТ", words: ["ТАБУРЕТ","ТЕАТР","БРАТ","БАР","ТУР"], bonus: [] },
+  { main: "ТАРІЛКА", words: ["ТАРІЛКА","КАРТА","ІКРА","РІКА","АКР"], bonus: ["КІЛ","КІР","КІТ","ЛАК"] },
+  { main: "ФІРАНКА", words: ["ФІРАНКА","ІКРА","КРАН","РІКА","АКР"], bonus: ["КІН","КІР","РАК","РІК"] },
+];
+
+/* ---------- Розкладка кросворда (генерується на льоту) ---------- */
+function buildLayout(words) {
+  const sorted = [...words].sort((a, b) => b.length - a.length);
+  const cells = new Map(); // "r,c" -> letter
+  const placed = [];
+  const key = (r, c) => r + "," + c;
+
+  function canPlace(word, r, c, dir) {
+    for (let i = 0; i < word.length; i++) {
+      const rr = dir === "h" ? r : r + i;
+      const cc = dir === "h" ? c + i : c;
+      const existing = cells.get(key(rr, cc));
+      if (existing && existing !== word[i]) return false;
+      if (!existing) {
+        // сусідні клітинки поперек не мають торкатися чужих слів
+        const side = dir === "h" ? [[rr - 1, cc], [rr + 1, cc]] : [[rr, cc - 1], [rr, cc + 1]];
+        for (const [sr, sc] of side) if (cells.has(key(sr, sc))) return false;
+      }
+    }
+    // клітинки перед і після слова мають бути порожні
+    const before = dir === "h" ? [r, c - 1] : [r - 1, c];
+    const after = dir === "h" ? [r, c + word.length] : [r + word.length, c];
+    if (cells.has(key(...before)) || cells.has(key(...after))) return false;
+    return true;
+  }
+  function doPlace(word, r, c, dir) {
+    const coords = [];
+    for (let i = 0; i < word.length; i++) {
+      const rr = dir === "h" ? r : r + i;
+      const cc = dir === "h" ? c + i : c;
+      cells.set(key(rr, cc), word[i]);
+      coords.push([rr, cc]);
+    }
+    placed.push({ word, coords });
+  }
+
+  doPlace(sorted[0], 0, 0, "h");
+  let fallbackRow = 2;
+  for (let w = 1; w < sorted.length; w++) {
+    const word = sorted[w];
+    let done = false;
+    outer:
+    for (const p of placed) {
+      for (let pi = 0; pi < p.word.length; pi++) {
+        for (let wi = 0; wi < word.length; wi++) {
+          if (p.word[pi] !== word[wi]) continue;
+          const [ar, ac] = p.coords[pi];
+          // спробувати вертикально та горизонтально
+          for (const dir of ["v", "h"]) {
+            const r = dir === "v" ? ar - wi : ar;
+            const c = dir === "v" ? ac : ac - wi;
+            if (canPlace(word, r, c, dir)) {
+              doPlace(word, r, c, dir);
+              done = true;
+              break outer;
+            }
+          }
+        }
+      }
+    }
+    if (!done) { doPlace(word, fallbackRow, 0, "h"); fallbackRow += 2; }
+  }
+  // нормалізація координат
+  let minR = Infinity, minC = Infinity, maxR = -Infinity, maxC = -Infinity;
+  for (const k of cells.keys()) {
+    const [r, c] = k.split(",").map(Number);
+    minR = Math.min(minR, r); minC = Math.min(minC, c);
+    maxR = Math.max(maxR, r); maxC = Math.max(maxC, c);
+  }
+  const norm = placed.map((p) => ({
+    word: p.word,
+    coords: p.coords.map(([r, c]) => [r - minR, c - minC]),
+  }));
+  return { placed: norm, rows: maxR - minR + 1, cols: maxC - minC + 1 };
+}
+
+/* ---------- Головний компонент ---------- */
+function App() {
+  const [screen, setScreen] = useState("menu"); // menu | game | settings
+  const [levelIdx, setLevelIdx] = useState(0);
+  const [coins, setCoins] = useState(50);
+  const [soundOn, setSoundOn] = useState(true);
+  const [maxUnlocked, setMaxUnlocked] = useState(0);
+
+  const play = useCallback((name, arg) => { if (soundOn) SFX[name](arg); }, [soundOn]);
+
+  return (
+    <div style={S.app}>
+      <Stars />
+      {screen === "menu" && (
+        <Menu
+          onPlay={() => setScreen("game")}
+          onSettings={() => setScreen("settings")}
+          levelIdx={levelIdx}
+          setLevelIdx={setLevelIdx}
+          maxUnlocked={maxUnlocked}
+          coins={coins}
+        />
+      )}
+      {screen === "settings" && (
+        <Settings soundOn={soundOn} setSoundOn={setSoundOn} onBack={() => setScreen("menu")} />
+      )}
+      {screen === "game" && (
+        <Game
+          key={levelIdx}
+          level={LEVELS[levelIdx]}
+          levelIdx={levelIdx}
+          coins={coins}
+          setCoins={setCoins}
+          play={play}
+          onExit={() => setScreen("menu")}
+          onNext={() => {
+            const next = Math.min(levelIdx + 1, LEVELS.length - 1);
+            setMaxUnlocked((m) => Math.max(m, next));
+            if (levelIdx < LEVELS.length - 1) setLevelIdx(levelIdx + 1);
+            else setScreen("menu");
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ---------- Зоряне тло ---------- */
+function Stars() {
+  const stars = useMemo(
+    () => Array.from({ length: 60 }, (_, i) => ({
+      x: Math.random() * 100, y: Math.random() * 100,
+      s: Math.random() * 2 + 1, d: Math.random() * 4 + 2, key: i,
+    })), []
+  );
+  return (
+    <div style={S.starsWrap} aria-hidden>
+      {stars.map((st) => (
+        <div key={st.key} style={{
+          position: "absolute", left: st.x + "%", top: st.y + "%",
+          width: st.s, height: st.s, borderRadius: "50%",
+          background: "#f5efe0", opacity: 0.5,
+          animation: `tw ${st.d}s ease-in-out infinite`,
+        }} />
+      ))}
+      <style>{`@keyframes tw {0%,100%{opacity:.15}50%{opacity:.7}}
+        @keyframes pop {0%{transform:scale(.3);opacity:0}70%{transform:scale(1.15)}100%{transform:scale(1);opacity:1}}
+        @keyframes shake {0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+        @media (prefers-reduced-motion: reduce){*{animation:none!important}}`}</style>
+    </div>
+  );
+}
+
+/* ---------- Меню ---------- */
+function Menu({ onPlay, onSettings, levelIdx, setLevelIdx, maxUnlocked, coins }) {
+  return (
+    <div style={S.screen}>
+      <div style={{ flex: 1 }} />
+      <div style={S.logoWrap}>
+        <div style={S.logoStar}>✦</div>
+        <h1 style={S.logo}>СЛОВОГРАЙ</h1>
+        <p style={S.tagline}>склади сузір'я зі слів</p>
+      </div>
+      <div style={{ flex: 1 }} />
+      <div style={S.coinsRow}>🪙 {coins} {monet(coins)}</div>
+      <button style={S.bigBtn} onClick={onPlay}>
+        Грати — рівень {levelIdx + 1}
+      </button>
+      <div style={S.levelPicker}>
+        {LEVELS.map((_, i) => (
+          <button
+            key={i}
+            disabled={i > maxUnlocked}
+            onClick={() => setLevelIdx(i)}
+            style={{
+              ...S.levelDot,
+              ...(i === levelIdx ? S.levelDotActive : {}),
+              ...(i > maxUnlocked ? S.levelDotLocked : {}),
+            }}
+          >
+            {i > maxUnlocked ? "🔒" : i + 1}
+          </button>
+        ))}
+      </div>
+      <button style={S.ghostBtn} onClick={onSettings}>⚙️ Налаштування</button>
+      <div style={{ height: 24 }} />
+    </div>
+  );
+}
+
+/* ---------- Налаштування ---------- */
+function Settings({ soundOn, setSoundOn, onBack }) {
+  return (
+    <div style={S.screen}>
+      <h2 style={S.h2}>Налаштування</h2>
+      <div style={S.settingRow}>
+        <span style={S.settingLabel}>Звук</span>
+        <button
+          style={{ ...S.toggle, background: soundOn ? "#f4c542" : "#3a4569" }}
+          onClick={() => setSoundOn(!soundOn)}
+          aria-pressed={soundOn}
+        >
+          <span style={{ ...S.knob, transform: soundOn ? "translateX(26px)" : "translateX(0)" }} />
+        </button>
+      </div>
+      <div style={S.settingNote}>
+        Усі звуки синтезуються на пристрої — без аудіофайлів.
+      </div>
+      <div style={{ flex: 1 }} />
+      <button style={S.bigBtn} onClick={onBack}>← Назад</button>
+      <div style={{ height: 24 }} />
+    </div>
+  );
+}
+
+/* ---------- Гра ---------- */
+const HINT_COST = 15;
+
+function Game({ level, levelIdx, coins, setCoins, play, onExit, onNext }) {
+  const layout = useMemo(() => buildLayout(level.words), [level]);
+  const letters = useMemo(() => level.main.split(""), [level]);
+  const [found, setFound] = useState([]);          // знайдені цільові слова
+  const [bonusFound, setBonusFound] = useState([]); // знайдені бонусні
+  const [revealed, setRevealed] = useState([]);     // підказки: "r,c"
+  const [sel, setSel] = useState([]);               // індекси вибраних літер
+  const [pointer, setPointer] = useState(null);
+  const [flash, setFlash] = useState(null);         // {type,text}
+  const [done, setDone] = useState(false);
+  const wheelRef = useRef(null);
+
+  const complete = found.length === level.words.length;
+  useEffect(() => {
+    if (complete && !done) {
+      setDone(true);
+      play("level");
+      setCoins((c) => c + 20);
+    }
+  }, [complete, done, play, setCoins]);
+
+  /* --- геометрія колеса --- */
+  const R = 118, LR = 86;
+  const letterPos = letters.map((_, i) => {
+    const a = (i / letters.length) * Math.PI * 2 - Math.PI / 2;
+    return { x: R + Math.cos(a) * LR, y: R + Math.sin(a) * LR };
+  });
+
+  const localPoint = (e) => {
+    const rect = wheelRef.current.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  };
+  const hitLetter = (p) => {
+    for (let i = 0; i < letterPos.length; i++) {
+      const dx = p.x - letterPos[i].x, dy = p.y - letterPos[i].y;
+      if (dx * dx + dy * dy < 30 * 30) return i;
+    }
+    return -1;
+  };
+
+  const onDown = (e) => {
+    if (done) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const p = localPoint(e);
+    const i = hitLetter(p);
+    if (i >= 0) { setSel([i]); play("pick", 0); }
+    setPointer(p);
+  };
+  const onMove = (e) => {
+    if (done || sel.length === 0) return;
+    const p = localPoint(e);
+    setPointer(p);
+    const i = hitLetter(p);
+    if (i >= 0) {
+      const idx = sel.indexOf(i);
+      if (idx === -1) { setSel((s) => [...s, i]); play("pick", sel.length); }
+      else if (idx === sel.length - 2) setSel((s) => s.slice(0, -1)); // відкат
+    }
+  };
+  const onUp = () => {
+    if (sel.length === 0) return;
+    const word = sel.map((i) => letters[i]).join("");
+    submit(word);
+    setSel([]);
+    setPointer(null);
+  };
+
+  function submit(word) {
+    if (word.length < 2) return;
+    if (found.includes(word) || bonusFound.includes(word)) {
+      play("dup"); pulse("dup", "Уже знайдено");
+      return;
+    }
+    if (level.words.includes(word)) {
+      setFound((f) => [...f, word]);
+      setCoins((c) => c + word.length);
+      play("word"); pulse("ok", `+${word.length} 🪙`);
+    } else if (level.bonus.includes(word)) {
+      setBonusFound((b) => [...b, word]);
+      setCoins((c) => c + 5);
+      play("bonus"); pulse("bonus", `Бонус! +5 🪙`);
+    } else {
+      play("fail"); pulse("fail", "Немає такого слова");
+    }
+  }
+
+  function pulse(type, text) {
+    setFlash({ type, text });
+    setTimeout(() => setFlash(null), 900);
+  }
+
+  function useHint() {
+    if (coins < HINT_COST) { pulse("fail", `Треба ${HINT_COST} ${monet(HINT_COST)}`); return; }
+    const hidden = [];
+    for (const p of layout.placed) {
+      if (found.includes(p.word)) continue;
+      p.coords.forEach(([r, c], i) => {
+        const k = r + "," + c;
+        if (!revealed.includes(k) && !isCellOpen(r, c)) hidden.push(k);
+      });
+    }
+    const uniq = [...new Set(hidden)];
+    if (uniq.length === 0) return;
+    const pick = uniq[Math.floor(Math.random() * uniq.length)];
+    setRevealed((rv) => [...rv, pick]);
+    setCoins((c) => c - HINT_COST);
+    play("hint");
+  }
+
+  const isCellOpen = (r, c) =>
+    layout.placed.some((p) => found.includes(p.word) && p.coords.some(([rr, cc]) => rr === r && cc === c));
+
+  /* --- клітинки кросворда --- */
+  const cellMap = useMemo(() => {
+    const m = new Map();
+    for (const p of layout.placed)
+      p.coords.forEach(([r, c], i) => m.set(r + "," + c, p.word[i]));
+    return m;
+  }, [layout]);
+
+  const gridW = Math.min(340, window.innerWidth - 32);
+  const cellSize = Math.min(46, Math.floor(gridW / layout.cols) - 4);
+
+  return (
+    <div style={S.screen}>
+      {/* верхня панель */}
+      <div style={S.topBar}>
+        <button style={S.iconBtn} onClick={onExit}>←</button>
+        <div style={S.levelTitle}>Рівень {levelIdx + 1}</div>
+        <div style={S.coinsSmall}>🪙 {coins}</div>
+      </div>
+
+      {/* кросворд */}
+      <div style={{ ...S.grid, gridTemplateColumns: `repeat(${layout.cols}, ${cellSize}px)` }}>
+        {Array.from({ length: layout.rows }).map((_, r) =>
+          Array.from({ length: layout.cols }).map((_, c) => {
+            const k = r + "," + c;
+            const letter = cellMap.get(k);
+            if (!letter) return <div key={k} style={{ width: cellSize, height: cellSize }} />;
+            const open = isCellOpen(r, c) || revealed.includes(k);
+            return (
+              <div key={k} style={{
+                width: cellSize, height: cellSize,
+                ...S.cell,
+                ...(open ? S.cellOpen : {}),
+                fontSize: cellSize * 0.5,
+                animation: open ? "pop .35s ease" : "none",
+              }}>
+                {open ? letter : ""}
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {/* статус / бонуси */}
+      <div style={S.statusRow}>
+        <span>{found.length}/{level.words.length} {sliv(level.words.length)}</span>
+        {level.bonus.length > 0 && (
+          <span style={{ opacity: 0.7 }}>✦ бонусні: {bonusFound.length}/{level.bonus.length}</span>
+        )}
+      </div>
+
+      {/* спалах-повідомлення */}
+      <div style={{ height: 34 }}>
+        {flash && (
+          <div style={{
+            ...S.flash,
+            color: flash.type === "fail" ? "#ff7b7b" : flash.type === "bonus" ? "#9ae6ff" : "#6fcf97",
+            animation: flash.type === "fail" ? "shake .3s ease" : "pop .3s ease",
+          }}>
+            {flash.text}
+          </div>
+        )}
+        {!flash && sel.length > 0 && (
+          <div style={{ ...S.flash, color: "#f4c542" }}>
+            {sel.map((i) => letters[i]).join("")}
+          </div>
+        )}
+      </div>
+
+      {/* колесо літер */}
+      <div
+        ref={wheelRef}
+        style={S.wheel}
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        onPointerCancel={onUp}
+      >
+        <svg width={R * 2} height={R * 2} style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+          {sel.map((li, i) => {
+            if (i === 0) return null;
+            const a = letterPos[sel[i - 1]], b = letterPos[li];
+            return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#f4c542" strokeWidth="3" strokeLinecap="round" opacity="0.9" />;
+          })}
+          {sel.length > 0 && pointer && (
+            <line
+              x1={letterPos[sel[sel.length - 1]].x} y1={letterPos[sel[sel.length - 1]].y}
+              x2={pointer.x} y2={pointer.y}
+              stroke="#f4c542" strokeWidth="2.5" strokeDasharray="4 5" opacity="0.6"
+            />
+          )}
+        </svg>
+        {letters.map((L, i) => (
+          <div key={i} style={{
+            ...S.wheelLetter,
+            left: letterPos[i].x - 27, top: letterPos[i].y - 27,
+            ...(sel.includes(i) ? S.wheelLetterSel : {}),
+          }}>
+            {L}
+          </div>
+        ))}
+      </div>
+
+      {/* нижня панель */}
+      <div style={S.bottomBar}>
+        <button style={S.hintBtn} onClick={useHint} disabled={done}>
+          💡 Підказка · {HINT_COST}
+        </button>
+      </div>
+
+      {/* завершення рівня */}
+      {done && (
+        <div style={S.overlay}>
+          <div style={S.overlayCard}>
+            <div style={{ fontSize: 44 }}>✦</div>
+            <h2 style={{ ...S.h2, margin: "8px 0" }}>Сузір'я складено!</h2>
+            <p style={{ margin: "4px 0 16px", opacity: 0.8 }}>
+              +20 {monet(20)} за рівень
+              {bonusFound.length > 0 && ` · ${bonusFound.length} бонусних ${sliv(bonusFound.length)}`}
+            </p>
+            <button style={S.bigBtn} onClick={onNext}>
+              {levelIdx < LEVELS.length - 1 ? "Наступний рівень →" : "У меню"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- Стилі: нічний степ ---------- */
+const S = {
+  app: {
+    minHeight: "100vh",
+    background: "linear-gradient(180deg,#101731 0%,#1b2447 55%,#2a2050 100%)",
+    color: "#f5efe0",
+    fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
+    position: "relative",
+    overflow: "hidden",
+    userSelect: "none",
+    WebkitUserSelect: "none",
+    touchAction: "none",
+  },
+  starsWrap: { position: "absolute", inset: 0, pointerEvents: "none" },
+  screen: {
+    position: "relative", zIndex: 1,
+    minHeight: "100vh", display: "flex", flexDirection: "column",
+    alignItems: "center", padding: "16px",
+    maxWidth: 420, margin: "0 auto",
+  },
+  logoWrap: { textAlign: "center" },
+  logoStar: { fontSize: 36, color: "#f4c542", marginBottom: 4 },
+  logo: {
+    margin: 0, fontSize: 42, fontWeight: 800, letterSpacing: "0.14em",
+    color: "#f4c542", textShadow: "0 0 24px rgba(244,197,66,.35)",
+  },
+  tagline: { margin: "6px 0 0", opacity: 0.65, letterSpacing: "0.08em", fontSize: 14 },
+  coinsRow: { fontSize: 16, marginBottom: 14, opacity: 0.9 },
+  bigBtn: {
+    width: "100%", maxWidth: 320, padding: "15px 20px",
+    fontSize: 18, fontWeight: 700, letterSpacing: "0.03em",
+    background: "#f4c542", color: "#1b2447",
+    border: "none", borderRadius: 14, cursor: "pointer",
+    boxShadow: "0 4px 20px rgba(244,197,66,.3)",
+  },
+  ghostBtn: {
+    marginTop: 14, padding: "12px 20px", fontSize: 15,
+    background: "transparent", color: "#f5efe0",
+    border: "1px solid rgba(245,239,224,.25)", borderRadius: 12, cursor: "pointer",
+  },
+  levelPicker: {
+    display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center",
+    margin: "16px 0 0", maxWidth: 320,
+    maxHeight: 180, overflowY: "auto", padding: "4px 2px",
+  },
+  levelDot: {
+    width: 42, height: 42, borderRadius: 12, border: "1px solid rgba(245,239,224,.2)",
+    background: "rgba(245,239,224,.06)", color: "#f5efe0",
+    fontSize: 15, fontWeight: 600, cursor: "pointer",
+  },
+  levelDotActive: { background: "#f4c542", color: "#1b2447", borderColor: "#f4c542" },
+  levelDotLocked: { opacity: 0.4, cursor: "default" },
+  h2: { fontSize: 26, fontWeight: 700, letterSpacing: "0.04em", margin: "12px 0 20px" },
+  settingRow: {
+    width: "100%", maxWidth: 320, display: "flex",
+    justifyContent: "space-between", alignItems: "center",
+    padding: "14px 16px", background: "rgba(245,239,224,.06)",
+    borderRadius: 14, marginBottom: 10,
+  },
+  settingLabel: { fontSize: 17 },
+  settingNote: { fontSize: 13, opacity: 0.55, maxWidth: 320, textAlign: "center", marginTop: 8 },
+  toggle: {
+    width: 56, height: 30, borderRadius: 15, border: "none",
+    position: "relative", cursor: "pointer", transition: "background .2s",
+  },
+  knob: {
+    position: "absolute", top: 3, left: 3, width: 24, height: 24,
+    borderRadius: "50%", background: "#fff", transition: "transform .2s",
+    display: "block",
+  },
+  topBar: {
+    width: "100%", display: "flex", justifyContent: "space-between",
+    alignItems: "center", marginBottom: 12,
+  },
+  iconBtn: {
+    width: 40, height: 40, borderRadius: 12, fontSize: 18,
+    background: "rgba(245,239,224,.08)", color: "#f5efe0",
+    border: "1px solid rgba(245,239,224,.15)", cursor: "pointer",
+  },
+  levelTitle: { fontSize: 17, fontWeight: 700, letterSpacing: "0.05em" },
+  coinsSmall: { fontSize: 15 },
+  grid: { display: "grid", gap: 4, justifyContent: "center", margin: "6px 0 10px" },
+  cell: {
+    display: "flex", alignItems: "center", justifyContent: "center",
+    borderRadius: 8, fontWeight: 700,
+    background: "rgba(245,239,224,.09)",
+    border: "1px solid rgba(245,239,224,.15)",
+    color: "#f5efe0",
+  },
+  cellOpen: {
+    background: "#f4c542", color: "#1b2447",
+    borderColor: "#f4c542", boxShadow: "0 0 10px rgba(244,197,66,.35)",
+  },
+  statusRow: {
+    display: "flex", gap: 16, fontSize: 14, opacity: 0.85, marginBottom: 2,
+  },
+  flash: { fontSize: 22, fontWeight: 800, letterSpacing: "0.1em", textAlign: "center" },
+  wheel: {
+    position: "relative", width: 236, height: 236,
+    margin: "6px 0", borderRadius: "50%",
+    background: "radial-gradient(circle,rgba(245,239,224,.07) 0%,rgba(245,239,224,.02) 70%)",
+    border: "1px solid rgba(245,239,224,.12)",
+    touchAction: "none",
+  },
+  wheelLetter: {
+    position: "absolute", width: 54, height: 54, borderRadius: "50%",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: 24, fontWeight: 800,
+    background: "rgba(245,239,224,.1)", color: "#f5efe0",
+    border: "1px solid rgba(245,239,224,.25)",
+    pointerEvents: "none",
+    transition: "background .12s, transform .12s",
+  },
+  wheelLetterSel: {
+    background: "#f4c542", color: "#1b2447",
+    borderColor: "#f4c542", transform: "scale(1.1)",
+    boxShadow: "0 0 14px rgba(244,197,66,.5)",
+  },
+  bottomBar: { marginTop: 4 },
+  hintBtn: {
+    padding: "11px 22px", fontSize: 15, fontWeight: 600,
+    background: "rgba(154,230,255,.12)", color: "#9ae6ff",
+    border: "1px solid rgba(154,230,255,.3)", borderRadius: 12, cursor: "pointer",
+  },
+  overlay: {
+    position: "fixed", inset: 0, zIndex: 10,
+    background: "rgba(12,17,38,.85)",
+    display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+  },
+  overlayCard: {
+    background: "#1b2447", border: "1px solid rgba(244,197,66,.3)",
+    borderRadius: 20, padding: "28px 24px", textAlign: "center",
+    maxWidth: 320, width: "100%", animation: "pop .4s ease",
+    boxShadow: "0 10px 40px rgba(0,0,0,.5)",
+  },
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
